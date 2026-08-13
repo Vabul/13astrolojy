@@ -1,0 +1,578 @@
+name: Build Astro13 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Setup JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Create Project Structure
+      run: |
+        mkdir -p project/app/src/main/kotlin/com/astro13/engine
+        mkdir -p project/app/src/main/kotlin/com/astro13/model
+        mkdir -p project/app/src/main/kotlin/com/astro13/ui
+        mkdir -p project/app/src/main/res/values
+        mkdir -p project/gradle/wrapper
+
+    - name: Write settings.gradle.kts
+      run: |
+        cat > project/settings.gradle.kts << 'EOF'
+        pluginManagement {
+            repositories {
+                google()
+                mavenCentral()
+                gradlePluginPortal()
+            }
+        }
+        dependencyResolutionManagement {
+            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+            repositories {
+                google()
+                mavenCentral()
+            }
+        }
+        rootProject.name = "Astro13"
+        include(":app")
+        EOF
+
+    - name: Write root build.gradle.kts
+      run: |
+        cat > project/build.gradle.kts << 'EOF'
+        plugins {
+            id("com.android.application") version "8.2.2" apply false
+            id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+        }
+        EOF
+
+    - name: Write app build.gradle.kts
+      run: |
+        cat > project/app/build.gradle.kts << 'EOF'
+        plugins {
+            id("com.android.application")
+            id("org.jetbrains.kotlin.android")
+        }
+        android {
+            namespace = "com.astro13"
+            compileSdk = 34
+            defaultConfig {
+                applicationId = "com.astro13"
+                minSdk = 26
+                targetSdk = 34
+                versionCode = 1
+                versionName = "1.0"
+            }
+            buildFeatures { compose = true }
+            composeOptions { kotlinCompilerExtensionVersion = "1.5.8" }
+            compileOptions {
+                sourceCompatibility = JavaVersion.VERSION_17
+                targetCompatibility = JavaVersion.VERSION_17
+            }
+            kotlinOptions { jvmTarget = "17" }
+            buildTypes {
+                release { isMinifyEnabled = false }
+            }
+            packaging {
+                resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+            }
+        }
+        dependencies {
+            val bom = platform("androidx.compose:compose-bom:2024.02.00")
+            implementation(bom)
+            implementation("androidx.core:core-ktx:1.12.0")
+            implementation("androidx.activity:activity-compose:1.8.2")
+            implementation("androidx.compose.ui:ui")
+            implementation("androidx.compose.material3:material3")
+            implementation("androidx.compose.foundation:foundation")
+            implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+            implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
+            implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
+            debugImplementation("androidx.compose.ui:ui-tooling")
+        }
+        EOF
+
+    - name: Write AndroidManifest.xml
+      run: |
+        cat > project/app/src/main/AndroidManifest.xml << 'EOF'
+        <?xml version="1.0" encoding="utf-8"?>
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <application
+                android:allowBackup="true"
+                android:label="مواضع کواکب ۱۳ برجی"
+                android:theme="@style/Theme.Astro13"
+                android:supportsRtl="true">
+                <activity
+                    android:name="com.astro13.ui.MainActivity"
+                    android:exported="true"
+                    android:windowSoftInputMode="adjustResize">
+                    <intent-filter>
+                        <action android:name="android.intent.action.MAIN" />
+                        <category android:name="android.intent.category.LAUNCHER" />
+                    </intent-filter>
+                </activity>
+            </application>
+        </manifest>
+        EOF
+
+    - name: Write themes.xml
+      run: |
+        cat > project/app/src/main/res/values/themes.xml << 'EOF'
+        <?xml version="1.0" encoding="utf-8"?>
+        <resources>
+            <style name="Theme.Astro13" parent="android:Theme.Material.NoTitleBar">
+                <item name="android:windowBackground">@android:color/black</item>
+            </style>
+        </resources>
+        EOF
+
+    - name: Write AstronomyEngine.kt
+      run: |
+        cat > project/app/src/main/kotlin/com/astro13/engine/AstronomyEngine.kt << 'KOTLIN'
+        package com.astro13.engine
+        import kotlin.math.*
+        object AstronomyEngine {
+            fun toRad(deg: Double) = deg * PI / 180.0
+            fun toDeg(rad: Double) = rad * 180.0 / PI
+            fun normalize360(a: Double): Double { var r = a % 360.0; if (r < 0) r += 360.0; return r }
+            fun julianDay(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int): Double {
+                val ut = hour + minute / 60.0 + second / 3600.0
+                var y = year; var m = month
+                if (m <= 2) { y -= 1; m += 12 }
+                val A = y / 100; val B = 2 - A + A / 4
+                return floor(365.25 * (y + 4716)) + floor(30.6001 * (m + 1)) + day + B - 1524.5 + ut / 24.0
+            }
+            fun T(jd: Double) = (jd - 2451545.0) / 36525.0
+            fun obliquity(jd: Double): Double {
+                val t = T(jd)
+                return 23.4392911 - 0.013004167 * t - 0.0000001639 * t * t + 0.0000005036 * t * t * t
+            }
+            fun sunLongitude(jd: Double): Double {
+                val t = T(jd)
+                var L0 = normalize360(280.46646 + 36000.76983 * t + 0.0003032 * t * t)
+                var M = normalize360(357.52911 + 35999.05029 * t - 0.0001537 * t * t)
+                val Mr = toRad(M)
+                val C = (1.914602 - 0.004817 * t - 0.000014 * t * t) * sin(Mr) +
+                        (0.019993 - 0.000101 * t) * sin(2 * Mr) + 0.000289 * sin(3 * Mr)
+                val omega = normalize360(125.04 - 1934.136 * t)
+                return normalize360(L0 + C - 0.00569 - 0.00478 * sin(toRad(omega)))
+            }
+            fun moonLongitude(jd: Double): Double {
+                val t = T(jd); val t2 = t*t; val t3 = t2*t; val t4 = t3*t
+                var Lp = 218.3164477 + 481267.88123421*t - 0.0015786*t2 + t3/538841 - t4/65194000
+                var D  = 297.8501921 + 445267.1114034*t - 0.0018819*t2 + t3/545868 - t4/113065000
+                var M  = 357.5291092 + 35999.0502909*t - 0.0001536*t2
+                var Mp = 134.9633964 + 477198.8675055*t + 0.0087414*t2 + t3/69699
+                var F  = 93.2720950  + 483202.0175233*t - 0.0036539*t2
+                val E = 1.0 - 0.002516*t - 0.0000074*t2
+                Lp = toRad(normalize360(Lp)); D = toRad(normalize360(D))
+                M  = toRad(normalize360(M));  Mp = toRad(normalize360(Mp)); F = toRad(normalize360(F))
+                var s = 6288774*sin(Mp) + 1274027*sin(2*D-Mp) + 658314*sin(2*D) + 213618*sin(2*Mp)
+                s += -185116*E*sin(M) + -114332*sin(2*F) + 58793*sin(2*D-2*Mp) + 57066*E*sin(2*D-M-Mp)
+                s += 53322*sin(2*D+Mp) + 45758*E*sin(2*D-M) + -40923*E*sin(M-Mp) + -34720*sin(D)
+                s += -30383*E*sin(M+Mp) + 15327*sin(2*D-2*F) + 10980*sin(Mp-2*F) + 10675*sin(4*D-Mp)
+                s += 10034*sin(3*Mp) + 8548*sin(4*D-2*Mp) + -7888*E*sin(2*D+M-Mp) + -6766*E*sin(2*D+M)
+                s += -5163*sin(D-Mp) + 4987*E*sin(D+M) + 4036*E*sin(2*D-M+Mp) + 3994*sin(2*D+2*Mp)
+                s += 3861*sin(4*D) + 3665*sin(2*D-3*Mp)
+                return normalize360(toDeg(Lp) + s / 1_000_000.0)
+            }
+            data class OrbEl(val L0:Double,val L1:Double,val a:Double,val e:Double,val de:Double,val M0:Double,val M1:Double,val varpi:Double)
+            private val els = mapOf(
+                "Mercury" to OrbEl(252.250906,149474.0722491,0.387098310,0.20563175,0.000020407,174.7948,149472.5153,77.4561),
+                "Venus"   to OrbEl(181.979801, 58519.2130302,0.723329820,0.00677192,-0.000047765, 50.4161, 58517.8039,131.5637),
+                "Mars"    to OrbEl(355.433000, 19141.6964471,1.523679342,0.09340065, 0.000090484, 19.3730, 19140.2993,336.0590),
+                "Jupiter" to OrbEl( 34.351519,  3036.3027748,5.202603209,0.04849793, 0.000163225, 20.9219,  3034.9057, 14.3312),
+                "Saturn"  to OrbEl( 50.077444,  1223.5110686,9.554909192,0.05554814,-0.000346641,317.0207,  1222.1138, 93.0572),
+                "Uranus"  to OrbEl(314.055005,   429.8640561,19.21844606,0.04629590,-0.000027337,142.5905,   428.4380,173.0052),
+                "Neptune" to OrbEl(304.348665,   219.8833092,30.11038687,0.00898809, 0.000006408,259.8835,   218.4677, 48.1237)
+            )
+            fun planetLongitude(jd: Double, name: String): Double {
+                val el = els[name] ?: return 0.0; val t = T(jd)
+                val e = el.e + el.de * t; val varpi = el.varpi
+                val M = normalize360(el.M0 + el.M1 * t); val Mr = toRad(M)
+                var E = Mr; repeat(10) { E = Mr + e * sin(E) }
+                val v = 2 * atan2(sqrt(1+e)*sin(E/2), sqrt(1-e)*cos(E/2))
+                val r = el.a * (1 - e * cos(E))
+                val lh = normalize360(toDeg(v) + varpi)
+                val sl = sunLongitude(jd)
+                val el2 = normalize360(sl + 180.0)
+                val x = r * cos(toRad(lh)) - cos(toRad(el2))
+                val y = r * sin(toRad(lh)) - sin(toRad(el2))
+                return normalize360(toDeg(atan2(y, x)))
+            }
+            fun gmst(jd: Double): Double {
+                val t = T(jd)
+                return normalize360(280.46061837 + 360.98564736629*(jd-2451545.0) + 0.000387933*t*t - t*t*t/38710000.0)
+            }
+            fun lst(jd: Double, geoLon: Double) = normalize360(gmst(jd) + geoLon)
+            fun ascendant(jd: Double, geoLat: Double, geoLon: Double): Double {
+                val l = toRad(lst(jd, geoLon)); val e = toRad(obliquity(jd)); val lat = toRad(geoLat)
+                return normalize360(toDeg(atan2(-cos(l), sin(e)*tan(lat) + cos(e)*sin(l))))
+            }
+            fun midheaven(jd: Double, geoLon: Double): Double {
+                val l = toRad(lst(jd, geoLon)); val e = toRad(obliquity(jd))
+                return normalize360(toDeg(atan2(sin(l)*cos(e), cos(l))))
+            }
+            fun northNode(jd: Double): Double {
+                val t = T(jd)
+                return normalize360(125.04452 - 1934.136261*t + 0.0020708*t*t)
+            }
+            fun southNode(jd: Double) = normalize360(northNode(jd) + 180.0)
+        }
+        KOTLIN
+
+    - name: Write ZodiacHelper.kt
+      run: |
+        cat > project/app/src/main/kotlin/com/astro13/engine/ZodiacHelper.kt << 'KOTLIN'
+        package com.astro13.engine
+        object ZodiacHelper {
+            data class ZodiacSign(val nameAr:String,val nameLatin:String,val symbol:String,val startDeg:Double,val endDeg:Double)
+            val signs = listOf(
+                ZodiacSign("حمل","Aries","♈",0.0,25.0),
+                ZodiacSign("ثور","Taurus","♉",25.0,62.0),
+                ZodiacSign("جوزا","Gemini","♊",62.0,90.0),
+                ZodiacSign("سرطان","Cancer","♋",90.0,110.0),
+                ZodiacSign("اسد","Leo","♌",110.0,146.0),
+                ZodiacSign("سنبله","Virgo","♍",146.0,190.0),
+                ZodiacSign("میزان","Libra","♎",190.0,213.0),
+                ZodiacSign("عقرب","Scorpius","♏",213.0,220.0),
+                ZodiacSign("مارافسا","Ophiuchus","⛎",220.0,238.0),
+                ZodiacSign("قوس","Sagittarius","♐",238.0,271.0),
+                ZodiacSign("جدی","Capricornus","♑",271.0,299.0),
+                ZodiacSign("دلو","Aquarius","♒",299.0,323.0),
+                ZodiacSign("حوت","Pisces","♓",323.0,360.0)
+            )
+            data class Position(val sign:ZodiacSign,val degreeInSign:Double,val totalDegree:Double)
+            fun getPosition(longitude: Double): Position {
+                val lon = ((longitude % 360.0) + 360.0) % 360.0
+                val sign = signs.find { lon >= it.startDeg && lon < it.endDeg } ?: signs.last()
+                return Position(sign, lon - sign.startDeg, lon)
+            }
+        }
+        KOTLIN
+
+    - name: Write ChartData.kt
+      run: |
+        cat > project/app/src/main/kotlin/com/astro13/model/ChartData.kt << 'KOTLIN'
+        package com.astro13.model
+        data class PlanetPoint(val nameAr:String,val nameLatin:String,val symbol:String,val longitude:Double,val signName:String,val signSymbol:String,val degreeInSign:Double,val isRetrograde:Boolean=false)
+        data class ChartInput(val year:Int,val month:Int,val day:Int,val hour:Int,val minute:Int,val second:Int=0,val latitude:Double,val longitude:Double,val timezone:Double=0.0)
+        data class ChartResult(val input:ChartInput,val julianDay:Double,val planets:List<PlanetPoint>,val ascendant:PlanetPoint,val midheaven:PlanetPoint,val northNode:PlanetPoint,val southNode:PlanetPoint)
+        KOTLIN
+
+    - name: Write ChartCalculator.kt
+      run: |
+        cat > project/app/src/main/kotlin/com/astro13/engine/ChartCalculator.kt << 'KOTLIN'
+        package com.astro13.engine
+        import com.astro13.model.*
+        object ChartCalculator {
+            private data class Def(val nameAr:String,val nameLatin:String,val symbol:String,val calc:(Double)->Double)
+            private val defs = listOf(
+                Def("خورشید","Sun","☀"){jd->AstronomyEngine.sunLongitude(jd)},
+                Def("ماه","Moon","🌙"){jd->AstronomyEngine.moonLongitude(jd)},
+                Def("عطارد","Mercury","☿"){jd->AstronomyEngine.planetLongitude(jd,"Mercury")},
+                Def("زهره","Venus","♀"){jd->AstronomyEngine.planetLongitude(jd,"Venus")},
+                Def("مریخ","Mars","♂"){jd->AstronomyEngine.planetLongitude(jd,"Mars")},
+                Def("مشتری","Jupiter","♃"){jd->AstronomyEngine.planetLongitude(jd,"Jupiter")},
+                Def("زحل","Saturn","♄"){jd->AstronomyEngine.planetLongitude(jd,"Saturn")},
+                Def("اورانوس","Uranus","♅"){jd->AstronomyEngine.planetLongitude(jd,"Uranus")},
+                Def("نپتون","Neptune","♆"){jd->AstronomyEngine.planetLongitude(jd,"Neptune")}
+            )
+            private fun make(nameAr:String,nameLatin:String,symbol:String,lon:Double,retro:Boolean=false):PlanetPoint {
+                val p=ZodiacHelper.getPosition(lon)
+                return PlanetPoint(nameAr,nameLatin,symbol,lon,p.sign.nameAr,p.sign.symbol,p.degreeInSign,retro)
+            }
+            fun calculate(input:ChartInput):ChartResult {
+                val h=input.hour-input.timezone
+                val jd=AstronomyEngine.julianDay(input.year,input.month,input.day,h.toInt(),input.minute,input.second)
+                val planets=defs.map{d->
+                    val lon=d.calc(jd); val lon2=d.calc(jd-1.0)
+                    val delta=AstronomyEngine.normalize360(lon-lon2)
+                    make(d.nameAr,d.nameLatin,d.symbol,lon,delta>180.0)
+                }
+                return ChartResult(input,jd,planets,
+                    make("طالع","Ascendant","AC",AstronomyEngine.ascendant(jd,input.latitude,input.longitude)),
+                    make("میانه","Midheaven","MC",AstronomyEngine.midheaven(jd,input.longitude)),
+                    make("نود ش","NNode","☊",AstronomyEngine.northNode(jd)),
+                    make("نود ج","SNode","☋",AstronomyEngine.southNode(jd)))
+            }
+        }
+        KOTLIN
+
+    - name: Write ChartViewModel.kt
+      run: |
+        cat > project/app/src/main/kotlin/com/astro13/ui/ChartViewModel.kt << 'KOTLIN'
+        package com.astro13.ui
+        import androidx.lifecycle.ViewModel
+        import androidx.lifecycle.viewModelScope
+        import com.astro13.engine.ChartCalculator
+        import com.astro13.model.ChartInput
+        import com.astro13.model.ChartResult
+        import kotlinx.coroutines.Dispatchers
+        import kotlinx.coroutines.flow.MutableStateFlow
+        import kotlinx.coroutines.flow.StateFlow
+        import kotlinx.coroutines.launch
+        import kotlinx.coroutines.withContext
+        import java.util.Calendar
+        sealed class ChartState {
+            object Idle:ChartState()
+            object Loading:ChartState()
+            data class Success(val result:ChartResult):ChartState()
+            data class Error(val message:String):ChartState()
+        }
+        class ChartViewModel:ViewModel() {
+            private val _state=MutableStateFlow<ChartState>(ChartState.Idle)
+            val state:StateFlow<ChartState>=_state
+            fun calculate(input:ChartInput) {
+                viewModelScope.launch {
+                    _state.value=ChartState.Loading
+                    try { _state.value=ChartState.Success(withContext(Dispatchers.Default){ChartCalculator.calculate(input)}) }
+                    catch(e:Exception){ _state.value=ChartState.Error(e.message?:"خطا") }
+                }
+            }
+        }
+        KOTLIN
+
+    - name: Write ZodiacWheel.kt
+      run: |
+        cat > project/app/src/main/kotlin/com/astro13/ui/ZodiacWheel.kt << 'KOTLIN'
+        package com.astro13.ui
+        import androidx.compose.foundation.Canvas
+        import androidx.compose.foundation.layout.size
+        import androidx.compose.runtime.Composable
+        import androidx.compose.ui.Modifier
+        import androidx.compose.ui.geometry.Offset
+        import androidx.compose.ui.graphics.Color
+        import androidx.compose.ui.graphics.drawscope.DrawScope
+        import androidx.compose.ui.graphics.drawscope.Stroke
+        import androidx.compose.ui.unit.dp
+        import com.astro13.engine.ZodiacHelper
+        import com.astro13.model.ChartResult
+        import kotlin.math.*
+        @Composable
+        fun ZodiacWheel(chart:ChartResult,modifier:Modifier=Modifier) {
+            Canvas(modifier=modifier.size(300.dp)) {
+                val cx=size.width/2f; val cy=size.height/2f
+                val outerR=size.width*0.47f; val innerR=size.width*0.38f; val pr=size.width*0.30f
+                drawCircle(Color(0xFF2A2A4A),outerR,Offset(cx,cy),style=Stroke(2f))
+                drawCircle(Color(0xFF2A2A4A),innerR,Offset(cx,cy),style=Stroke(1f))
+                drawCircle(Color(0xFF1A1A2E),innerR*0.6f,Offset(cx,cy))
+                ZodiacHelper.signs.forEach { s ->
+                    val a=Math.toRadians(s.startDeg-90.0).toFloat()
+                    val c=if(s.nameAr=="مارافسا") Color(0xFF4CAF50) else Color(0xFF3A3A5A)
+                    drawLine(c,Offset(cx+innerR*cos(a),cy+innerR*sin(a)),Offset(cx+outerR*cos(a),cy+outerR*sin(a)),if(s.nameAr=="مارافسا")2f else 1f)
+                }
+                (chart.planets+listOf(chart.ascendant,chart.midheaven,chart.northNode)).forEach { p ->
+                    val a=Math.toRadians(p.longitude-90.0).toFloat()
+                    val x=cx+pr*cos(a); val y=cy+pr*sin(a)
+                    val c=when{p.isRetrograde->Color(0xFFFF6B6B);p.signName=="مارافسا"->Color(0xFF4CAF50);p.nameAr in listOf("خورشید","ماه")->Color(0xFFFFD700);else->Color(0xFFAB6BE8)}
+                    drawCircle(c,6f,Offset(x,y)); drawCircle(Color.Black,6f,Offset(x,y),style=Stroke(1f))
+                    drawLine(c.copy(alpha=0.3f),Offset(cx,cy),Offset(x,y),0.5f)
+                }
+            }
+        }
+        KOTLIN
+
+    - name: Write MainActivity.kt
+      run: |
+        cat > project/app/src/main/kotlin/com/astro13/ui/MainActivity.kt << 'KOTLIN'
+        package com.astro13.ui
+        import android.os.Bundle
+        import androidx.activity.ComponentActivity
+        import androidx.activity.compose.setContent
+        import androidx.compose.foundation.*
+        import androidx.compose.foundation.layout.*
+        import androidx.compose.foundation.lazy.LazyColumn
+        import androidx.compose.foundation.lazy.items
+        import androidx.compose.foundation.shape.RoundedCornerShape
+        import androidx.compose.foundation.text.KeyboardOptions
+        import androidx.compose.material3.*
+        import androidx.compose.runtime.*
+        import androidx.compose.ui.Alignment
+        import androidx.compose.ui.Modifier
+        import androidx.compose.ui.graphics.Color
+        import androidx.compose.ui.text.font.FontWeight
+        import androidx.compose.ui.text.input.KeyboardType
+        import androidx.compose.ui.text.style.TextAlign
+        import androidx.compose.ui.unit.dp
+        import androidx.compose.ui.unit.sp
+        import androidx.lifecycle.compose.collectAsStateWithLifecycle
+        import androidx.lifecycle.viewmodel.compose.viewModel
+        import com.astro13.model.ChartInput
+        import com.astro13.model.ChartResult
+        import com.astro13.model.PlanetPoint
+        import java.util.Calendar
+        object C {
+            val Bg=Color(0xFF0D0D1A); val Sf=Color(0xFF1A1A2E); val SfL=Color(0xFF16213E)
+            val Au=Color(0xFFFFD700); val AuL=Color(0xFFFFE55C); val Pu=Color(0xFF7B2FBE)
+            val PuL=Color(0xFFAB6BE8); val Te=Color(0xFF00BCD4); val Tx=Color(0xFFE8E8F0)
+            val Ts=Color(0xFF9090A8); val Re=Color(0xFFFF6B6B); val Op=Color(0xFF4CAF50)
+            val Dv=Color(0xFF2A2A4A)
+        }
+        @Composable fun Th(c: @Composable ()->Unit)=MaterialTheme(colorScheme=darkColorScheme(background=C.Bg,surface=C.Sf,primary=C.Au,onPrimary=Color.Black,onBackground=C.Tx,onSurface=C.Tx),content=c)
+        class MainActivity:ComponentActivity() {
+            override fun onCreate(s:Bundle?) { super.onCreate(s); setContent { Th { Surface(Modifier.fillMaxSize(),color=C.Bg){App()} } } }
+        }
+        @Composable fun App(vm:ChartViewModel=viewModel()) {
+            val state by vm.state.collectAsStateWithLifecycle()
+            val cal=Calendar.getInstance()
+            var year by remember{mutableStateOf(cal.get(Calendar.YEAR).toString())}
+            var month by remember{mutableStateOf((cal.get(Calendar.MONTH)+1).toString())}
+            var day by remember{mutableStateOf(cal.get(Calendar.DAY_OF_MONTH).toString())}
+            var hour by remember{mutableStateOf(cal.get(Calendar.HOUR_OF_DAY).toString())}
+            var min by remember{mutableStateOf(cal.get(Calendar.MINUTE).toString())}
+            var lat by remember{mutableStateOf("35.6892")}
+            var lon by remember{mutableStateOf("51.3890")}
+            var tz by remember{mutableStateOf("3.5")}
+            var wheel by remember{mutableStateOf(false)}
+            LazyColumn(Modifier.fillMaxSize().padding(horizontal=14.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                item { Spacer(Modifier.height(14.dp)); Column(Modifier.fillMaxWidth(),horizontalAlignment=Alignment.CenterHorizontally){
+                    Text("⭐  مواضع حقیقی کواکب  ⭐",color=C.Au,fontSize=20.sp,fontWeight=FontWeight.Bold)
+                    Text("۱۳ برجی · الگوریتم Meeus · پایه JPL/ناسا",color=C.Ts,fontSize=12.sp)
+                    Spacer(Modifier.height(6.dp)); Divider(color=C.Dv)
+                }}
+                item { Card(Modifier.fillMaxWidth(),colors=CardDefaults.cardColors(C.Sf),shape=RoundedCornerShape(12.dp)){
+                    Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
+                        Text("📅  تاریخ و زمان (میلادی)",color=C.Au,fontSize=13.sp,fontWeight=FontWeight.SemiBold)
+                        Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                            F("سال",year,Modifier.weight(1.4f)){year=it}; F("ماه",month,Modifier.weight(1f)){month=it}; F("روز",day,Modifier.weight(1f)){day=it}
+                        }
+                        Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                            F("ساعت",hour,Modifier.weight(1f)){hour=it}; F("دقیقه",min,Modifier.weight(1f)){min=it}; F("UTC+",tz,Modifier.weight(1f)){tz=it}
+                        }
+                    }
+                }}
+                item { Card(Modifier.fillMaxWidth(),colors=CardDefaults.cardColors(C.Sf),shape=RoundedCornerShape(12.dp)){
+                    Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
+                        Text("📍  موقعیت جغرافیایی",color=C.Au,fontSize=13.sp,fontWeight=FontWeight.SemiBold)
+                        Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                            F("عرض (Lat)",lat,Modifier.weight(1f)){lat=it}; F("طول (Lon)",lon,Modifier.weight(1f)){lon=it}
+                        }
+                        Text("تهران: lat=35.69  lon=51.39  UTC=3.5",color=C.Ts,fontSize=11.sp)
+                    }
+                }}
+                item { Button(onClick={vm.calculate(ChartInput(year.toIntOrNull()?:2024,month.toIntOrNull()?:1,day.toIntOrNull()?:1,hour.toIntOrNull()?:0,min.toIntOrNull()?:0,latitude=lat.toDoubleOrNull()?:35.69,longitude=lon.toDoubleOrNull()?:51.39,timezone=tz.toDoubleOrNull()?:3.5))},Modifier.fillMaxWidth().height(50.dp),colors=ButtonDefaults.buttonColors(C.Au,Color.Black),shape=RoundedCornerShape(12.dp)){
+                    Text("محاسبه‌ی موضع کواکب",fontSize=15.sp,fontWeight=FontWeight.Bold)
+                }}
+                when(val s=state){
+                    is ChartState.Loading -> item{Box(Modifier.fillMaxWidth().padding(24.dp),Alignment.Center){CircularProgressIndicator(color=C.Au)}}
+                    is ChartState.Error -> item{Text("❌ ${s.message}",color=C.Re,modifier=Modifier.padding(8.dp))}
+                    is ChartState.Success -> {
+                        val ch=s.result
+                        item { Card(Modifier.fillMaxWidth(),colors=CardDefaults.cardColors(C.SfL),shape=RoundedCornerShape(10.dp)){
+                            Column(Modifier.padding(12.dp).fillMaxWidth(),horizontalAlignment=Alignment.CenterHorizontally){
+                                Text("${ch.input.day}/${ch.input.month}/${ch.input.year}  —  ${ch.input.hour}:${"%02d".format(ch.input.minute)}  UTC+${ch.input.timezone}",color=C.AuL,fontSize=13.sp,fontWeight=FontWeight.Medium)
+                                Text("JD = ${"%.4f".format(ch.julianDay)}",color=C.Ts,fontSize=11.sp)
+                            }
+                        }}
+                        item { OutlinedButton(onClick={wheel=!wheel},Modifier.fillMaxWidth(),border=BorderStroke(1.dp,C.Pu),shape=RoundedCornerShape(10.dp)){
+                            Text(if(wheel)"پنهان کردن چرخ" else "نمایش چرخ دایره‌البروج",color=C.PuL,fontSize=13.sp)
+                        }}
+                        if(wheel) item{Box(Modifier.fillMaxWidth(),Alignment.Center){ZodiacWheel(ch,Modifier.size(280.dp))}}
+                        item{Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)){SC(ch.ascendant,C.Pu,Modifier.weight(1f));SC(ch.midheaven,C.Te,Modifier.weight(1f))}}
+                        item{TH()}
+                        items(ch.planets){PR(it)}
+                        item{PR(ch.northNode)}; item{PR(ch.southNode)}
+                        item{Spacer(Modifier.height(32.dp))}
+                    }
+                    else->{}
+                }
+            }
+        }
+        @Composable fun F(label:String,value:String,modifier:Modifier,onChange:(String)->Unit){
+            OutlinedTextField(value=value,onValueChange=onChange,label={Text(label,fontSize=11.sp,color=C.Ts)},modifier=modifier,
+                keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal),singleLine=true,
+                colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=C.Au,unfocusedBorderColor=C.Dv,focusedTextColor=C.Tx,unfocusedTextColor=C.Tx,cursorColor=C.Au),
+                textStyle=LocalTextStyle.current.copy(fontSize=14.sp))
+        }
+        @Composable fun SC(p:PlanetPoint,ac:Color,m:Modifier){
+            Card(m,colors=CardDefaults.cardColors(C.Sf),shape=RoundedCornerShape(10.dp),border=BorderStroke(1.dp,ac.copy(0.4f))){
+                Column(Modifier.padding(10.dp).fillMaxWidth(),horizontalAlignment=Alignment.CenterHorizontally){
+                    Text(p.symbol,color=ac,fontSize=18.sp)
+                    Text(p.nameAr,color=C.Tx,fontSize=12.sp,fontWeight=FontWeight.Bold)
+                    Text("${"%.4f".format(p.longitude)}°",color=ac,fontSize=14.sp,fontWeight=FontWeight.Bold)
+                    Text("${p.signSymbol} ${p.signName}",color=C.Ts,fontSize=12.sp)
+                    Text(dms(p.degreeInSign),color=C.Ts,fontSize=11.sp)
+                }
+            }
+        }
+        @Composable fun TH(){Row(Modifier.fillMaxWidth().background(C.SfL,RoundedCornerShape(topStart=10.dp,topEnd=10.dp)).padding(10.dp,8.dp)){
+            Text("کوکب",color=C.Au,fontSize=12.sp,fontWeight=FontWeight.Bold,modifier=Modifier.weight(1.4f))
+            Text("درجه ۰–۳۶۰",color=C.Au,fontSize=12.sp,fontWeight=FontWeight.Bold,modifier=Modifier.weight(1.5f),textAlign=TextAlign.Center)
+            Text("برج",color=C.Au,fontSize=12.sp,fontWeight=FontWeight.Bold,modifier=Modifier.weight(1f),textAlign=TextAlign.Center)
+            Text("در برج",color=C.Au,fontSize=12.sp,fontWeight=FontWeight.Bold,modifier=Modifier.weight(1.3f),textAlign=TextAlign.End)
+        }; Divider(color=C.Au.copy(0.25f))}
+        @Composable fun PR(p:PlanetPoint){
+            val isO=p.signName=="مارافسا"
+            Row(Modifier.fillMaxWidth().background(if(isO)C.Op.copy(0.07f) else Color.Transparent).padding(10.dp,8.dp),verticalAlignment=Alignment.CenterVertically){
+                Column(Modifier.weight(1.4f)){
+                    Text("${p.symbol} ${p.nameAr}",color=if(p.isRetrograde)C.Re else C.Tx,fontSize=13.sp,fontWeight=FontWeight.Medium)
+                    if(p.isRetrograde)Text("℞ رجعی",color=C.Re,fontSize=10.sp)
+                }
+                Text("${"%.4f".format(p.longitude)}°",color=C.AuL,fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.weight(1.5f),textAlign=TextAlign.Center)
+                Text("${p.signSymbol} ${p.signName}",color=if(isO)C.Op else C.PuL,fontSize=12.sp,modifier=Modifier.weight(1f),textAlign=TextAlign.Center)
+                Text(dms(p.degreeInSign),color=C.Ts,fontSize=12.sp,modifier=Modifier.weight(1.3f),textAlign=TextAlign.End)
+            }
+            Divider(color=C.Dv,thickness=0.5.dp)
+        }
+        fun dms(d:Double):String{val i=d.toInt();val m=((d-i)*60).toInt();val s=(((d-i)*60-m)*60).toInt();return "$i° $m' $s\""}
+        KOTLIN
+
+    - name: Setup Gradle Wrapper
+      run: |
+        cd project
+        cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+        distributionBase=GRADLE_USER_HOME
+        distributionPath=wrapper/dists
+        distributionUrl=https\://services.gradle.org/distributions/gradle-8.6-bin.zip
+        networkTimeout=10000
+        zipStoreBase=GRADLE_USER_HOME
+        zipStorePath=wrapper/dists
+        EOF
+        
+        # Download gradle wrapper jar
+        curl -sL "https://github.com/nicholaswilde/gradle-wrapper/raw/main/gradle-wrapper.jar" \
+          -o gradle/wrapper/gradle-wrapper.jar || \
+        wget -q "https://raw.githubusercontent.com/gradle/gradle/v8.6.0/gradle/wrapper/gradle-wrapper.jar" \
+          -O gradle/wrapper/gradle-wrapper.jar || true
+        
+        # Create gradlew
+        curl -sL "https://raw.githubusercontent.com/gradle/gradle/v8.6.0/gradlew" -o gradlew || \
+        cat > gradlew << 'GRADLEW'
+        #!/bin/sh
+        CLASSPATH=$(dirname "$0")/gradle/wrapper/gradle-wrapper.jar
+        exec java "-Dorg.gradle.appname=$(basename "$0")" -classpath "$CLASSPATH" org.gradle.wrapper.GradleWrapperMain "$@"
+        GRADLEW
+        chmod +x gradlew
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Accept Licenses
+      run: yes | sdkmanager --licenses || true
+
+    - name: Build Debug APK
+      working-directory: project
+      run: ./gradlew assembleDebug --stacktrace --no-daemon
+      env:
+        ANDROID_HOME: ${{ env.ANDROID_HOME }}
+
+    - name: Upload Debug APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: Astro13-Debug-APK
+        path: project/app/build/outputs/apk/debug/app-debug.apk
+        retention-days: 30
+
+    - name: Show APK info
+      run: |
+        ls -lh project/app/build/outputs/apk/debug/
+        echo "✅ APK آماده است! از تب Artifacts دانلود کنید"
